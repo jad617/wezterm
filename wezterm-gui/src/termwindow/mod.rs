@@ -396,6 +396,9 @@ pub struct TermWindow {
     /// Set by FloatingPaneLeader: the next leader key assignment acts on
     /// the focused float
     float_leader_pending: bool,
+    /// Set while painting a float: pane backgrounds are clipped to it, as
+    /// they otherwise reach half a cell past their pane to fill split gaps
+    float_paint_area: Option<RectF>,
     dead_key_status: DeadKeyStatus,
     key_table_state: KeyTableState,
     show_tab_bar: bool,
@@ -721,6 +724,7 @@ impl TermWindow {
             leader_is_down: None,
             action_targets_tab: false,
             float_leader_pending: false,
+            float_paint_area: None,
             dead_key_status: DeadKeyStatus::None,
             show_tab_bar,
             show_scroll_bar: config.enable_scroll_bar,

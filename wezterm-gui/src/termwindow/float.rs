@@ -370,6 +370,7 @@ impl crate::TermWindow {
             // The scroll bar is drawn along the window edge, which isn't
             // where a float's active pane is
             let show_scroll_bar = std::mem::replace(&mut self.show_scroll_bar, false);
+            self.float_paint_area = Some(area);
             let mut result = Ok(());
             for pos in &float.panes {
                 if pos.is_active {
@@ -385,6 +386,7 @@ impl crate::TermWindow {
                 }
             }
             self.show_scroll_bar = show_scroll_bar;
+            self.float_paint_area = None;
             result?;
 
             // Dragging a split resizes the window's tab, so the float's own

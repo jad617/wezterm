@@ -150,6 +150,10 @@ impl crate::TermWindow {
                 },
             )
         };
+        let background_rect = match self.float_paint_area {
+            Some(area) => background_rect.intersection(&area).unwrap_or(area),
+            None => background_rect,
+        };
 
         if self.window_background.is_empty() {
             // Per-pane, palette-specified background
