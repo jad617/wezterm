@@ -48,10 +48,22 @@ struct TabInner {
     recency: Recency,
 }
 
+/// A floating split layout displayed over one of the panes of a Tab
+#[derive(Clone)]
+pub struct Float {
+    /// The pane of the parent tab that the float is displayed over
+    pub owner: PaneId,
+    /// The float's own split layout. It is registered with the mux but
+    /// is not part of any window.
+    pub tab: Arc<Tab>,
+    pub visible: bool,
+}
+
 /// A Tab is a container of Panes
 pub struct Tab {
     inner: Mutex<TabInner>,
     tab_id: TabId,
+    floats: Mutex<Vec<Float>>,
 }
 
 #[derive(Clone)]
@@ -513,7 +525,64 @@ impl Tab {
         Self {
             inner: Mutex::new(inner),
             tab_id,
+            floats: Mutex::new(vec![]),
         }
+    }
+
+    /// Returns the live float anchored to the specified pane, if any
+    pub fn get_float(&self, owner: PaneId) -> Option<Float> {
+        self.floats
+            .lock()
+            .iter()
+            .find(|f| f.owner == owner && !f.tab.is_dead())
+            .cloned()
+    }
+
+    /// Returns the live floats of this tab, visible or not
+    pub fn iter_floats(&self) -> Vec<Float> {
+        self.floats
+            .lock()
+            .iter()
+            .filter(|f| !f.tab.is_dead())
+            .cloned()
+            .collect()
+    }
+
+    /// Returns the float that has keyboard focus: the visible float
+    /// anchored to the active pane of this tab
+    pub fn get_active_float(&self) -> Option<Float> {
+        let active = self.get_active_pane()?.pane_id();
+        self.get_float(active).filter(|f| f.visible)
+    }
+
+    /// Anchors `tab` as a visible float over the `owner` pane, replacing
+    /// any existing float for that pane. Use `Mux::add_float` rather than
+    /// calling this directly so that the mux can track the float.
+    pub fn add_float(&self, owner: PaneId, tab: Arc<Tab>) {
+        let mut floats = self.floats.lock();
+        floats.retain(|f| f.owner != owner);
+        floats.push(Float {
+            owner,
+            tab,
+            visible: true,
+        });
+    }
+
+    pub fn set_float_visible(&self, owner: PaneId, visible: bool) {
+        for f in self.floats.lock().iter_mut() {
+            if f.owner == owner {
+                f.visible = visible;
+            }
+        }
+    }
+
+    /// Removes and returns the floats whose float tab or owner pane
+    /// matches `pred`
+    pub fn take_floats<F: Fn(&Float) -> bool>(&self, pred: F) -> Vec<Float> {
+        let mut floats = self.floats.lock();
+        let (taken, kept) = floats.drain(..).partition(|f| pred(f));
+        *floats = kept;
+        taken
     }
 
     pub fn get_title(&self) -> String {

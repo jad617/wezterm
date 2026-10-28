@@ -1,10 +1,26 @@
 use crate::spawn::SpawnWhere;
 use config::keyassignment::{SpawnCommand, SpawnTabDomain};
 use config::TermConfig;
+use mux::Mux;
 use std::sync::Arc;
 
 impl super::TermWindow {
     pub fn spawn_command(&self, spawn: &SpawnCommand, spawn_where: SpawnWhere) {
+        // Splitting happens asynchronously, by which point the leader key
+        // assignment that decided whether to split the focused float or
+        // the pane underneath it is over, so resolve the pane now
+        let spawn_where = match spawn_where {
+            SpawnWhere::SplitPane(request) => match self.get_target_tab() {
+                Some(tab) if Mux::get().get_float_parent(tab.tab_id()).is_some() => {
+                    match tab.get_active_pane() {
+                        Some(pane) => SpawnWhere::SplitPaneOf(pane.pane_id(), request),
+                        None => return,
+                    }
+                }
+                _ => spawn_where,
+            },
+            _ => spawn_where,
+        };
         let size = if spawn_where == SpawnWhere::NewWindow {
             self.config.initial_size(
                 self.dimensions.dpi as u32,

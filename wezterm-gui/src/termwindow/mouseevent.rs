@@ -190,7 +190,14 @@ impl super::TermWindow {
         let prior_ui_item = self.last_ui_item.clone();
 
         let ui_item = if matches!(self.current_mouse_capture, None | Some(MouseCapture::UI)) {
-            let ui_item = self.resolve_ui_item(&event);
+            let ui_item = self.resolve_ui_item(&event).filter(|item| {
+                // Splits underneath a float are covered by it
+                !(matches!(item.item_type, UIItemType::Split(_))
+                    && self
+                        .get_floats_to_render()
+                        .iter()
+                        .any(|f| f.owner_contains(x, y)))
+            });
 
             match (self.last_ui_item.take(), &ui_item) {
                 (Some(prior), Some(item)) => {
@@ -667,7 +674,102 @@ impl super::TermWindow {
             Some(MouseCapture::TerminalPane(_))
         );
 
-        for pos in self.get_panes_to_render() {
+        // Mouse input over a pane that has a visible float goes to the
+        // float: to the float pane under the mouse, or for wheel events
+        // that land on its margin or index bar, to its active pane
+        let floats = self.get_floats_to_render();
+        let float_hit = floats.iter().find(|f| {
+            if is_already_captured {
+                f.panes.iter().any(|p| p.pane.pane_id() == pane.pane_id())
+            } else {
+                f.owner_contains(column, row)
+            }
+        });
+        if let Some(float) = float_hit {
+            let float_active_idx = float.float.tab.get_active_idx();
+            let hovered = if is_already_captured {
+                float.panes.iter().find(|p| p.pane.pane_id() == pane.pane_id())
+            } else {
+                float.panes.iter().find(|p| {
+                    row >= p.top as i64
+                        && row <= (p.top + p.height) as i64
+                        && column >= p.left
+                        && column <= p.left + p.width
+                })
+            };
+            let target = match (&event.kind, hovered) {
+                (_, Some(p)) => p,
+                (WMEK::VertWheel(_) | WMEK::HorzWheel(_), None) => {
+                    match float
+                        .panes
+                        .iter()
+                        .find(|p| p.is_zoomed || p.index == float_active_idx)
+                    {
+                        Some(p) => p,
+                        None => return,
+                    }
+                }
+                (WMEK::Press(_), None) => {
+                    // Clicking the margin or index bar focuses the float
+                    if !float.owner.is_zoomed {
+                        if let Some(tab) =
+                            Mux::get().get_active_tab_for_window(self.mux_window_id)
+                        {
+                            tab.set_active_idx(float.owner.index);
+                        }
+                    }
+                    context.invalidate();
+                    return;
+                }
+                _ => return,
+            };
+
+            if !is_already_captured {
+                match &event.kind {
+                    WMEK::Press(_) => {
+                        // A zoomed pane is reported as index 0 but is
+                        // already active, so leave it be
+                        if !float.is_focused || target.index != float_active_idx {
+                            if !float.owner.is_zoomed {
+                                if let Some(tab) =
+                                    Mux::get().get_active_tab_for_window(self.mux_window_id)
+                                {
+                                    tab.set_active_idx(float.owner.index);
+                                }
+                            }
+                            if !target.is_zoomed {
+                                float.float.tab.set_active_idx(target.index);
+                            }
+                            is_click_to_focus_pane = true;
+                        }
+                        pane = Arc::clone(&target.pane);
+                    }
+                    WMEK::VertWheel(_) | WMEK::HorzWheel(_) => {
+                        pane = Arc::clone(&target.pane);
+                        context.invalidate();
+                    }
+                    WMEK::Move | WMEK::Release(_) => {}
+                }
+            }
+
+            column = column.saturating_sub(target.left);
+            row = row.saturating_sub(target.top as i64).max(0);
+            if position.column < target.left {
+                x_pixel_offset -= self.render_metrics.cell_size.width
+                    * (target.left as isize - position.column as isize);
+            }
+            if position.row < target.top as i64 {
+                y_pixel_offset -= self.render_metrics.cell_size.height
+                    * (target.top as isize - position.row as isize);
+            }
+        }
+
+        let tree_panes = if float_hit.is_some() {
+            vec![]
+        } else {
+            self.get_panes_to_render()
+        };
+        for pos in tree_panes {
             if !is_already_captured
                 && row >= pos.top as i64
                 && row <= (pos.top + pos.height) as i64

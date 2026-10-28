@@ -73,6 +73,7 @@ pub mod background;
 pub mod box_model;
 pub mod charselect;
 pub mod clipboard;
+mod float;
 pub mod keyevent;
 pub mod modal;
 mod mouseevent;
@@ -389,6 +390,12 @@ pub struct TermWindow {
     input_map: InputMap,
     /// If is_some, the LEADER modifier is active until the specified instant.
     leader_is_down: Option<std::time::Instant>,
+    /// Set while performing a leader key assignment, which acts on the
+    /// tab's own split layout rather than on a focused float
+    action_targets_tab: bool,
+    /// Set by FloatingPaneLeader: the next leader key assignment acts on
+    /// the focused float
+    float_leader_pending: bool,
     dead_key_status: DeadKeyStatus,
     key_table_state: KeyTableState,
     show_tab_bar: bool,
@@ -712,6 +719,8 @@ impl TermWindow {
             render_state,
             input_map: InputMap::new(&config),
             leader_is_down: None,
+            action_targets_tab: false,
+            float_leader_pending: false,
             dead_key_status: DeadKeyStatus::None,
             show_tab_bar,
             show_scroll_bar: config.enable_scroll_bar,
@@ -1434,6 +1443,10 @@ impl TermWindow {
         }
 
         tab.contains_pane(pane_id)
+            || tab
+                .iter_floats()
+                .iter()
+                .any(|f| f.visible && f.tab.contains_pane(pane_id))
     }
 
     fn mux_pane_output_event(&mut self, pane_id: PaneId) {
@@ -2946,8 +2959,7 @@ impl TermWindow {
                 }
             }
             AdjustPaneSize(direction, amount) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_target_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -2959,8 +2971,7 @@ impl TermWindow {
                 }
             }
             ActivatePaneByIndex(index) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_target_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -2975,11 +2986,17 @@ impl TermWindow {
                 }
             }
             ActivatePaneDirection(direction) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let mut tab = match self.get_target_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
+                // Moving past the edge of a float continues into the panes
+                // that it floats over
+                if tab.get_pane_direction(*direction, false).is_none() {
+                    if let Some(parent) = Mux::get().get_float_parent(tab.tab_id()) {
+                        tab = parent;
+                    }
+                }
 
                 let tab_id = tab.tab_id();
 
@@ -2987,17 +3004,21 @@ impl TermWindow {
                     tab.activate_pane_direction(*direction);
                 }
             }
+            ToggleFloatingPane => self.toggle_floating_pane(),
+            FloatingPaneLeader => {
+                if self.get_active_float().is_some() {
+                    self.float_leader_pending = true;
+                }
+            }
             TogglePaneZoomState => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_target_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
                 tab.toggle_zoom();
             }
             SetPaneZoomState(zoomed) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_target_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -3099,8 +3120,7 @@ impl TermWindow {
                 // NOP here; handled by the overlay directly
             }
             RotatePanes(direction) => {
-                let mux = Mux::get();
-                let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+                let tab = match self.get_target_tab() {
                     Some(tab) => tab,
                     None => return Ok(PerformAssignmentResult::Handled),
                 };
@@ -3213,7 +3233,7 @@ impl TermWindow {
     fn close_current_pane(&mut self, confirm: bool) {
         let mux_window_id = self.mux_window_id;
         let mux = Mux::get();
-        let tab = match mux.get_active_tab_for_window(mux_window_id) {
+        let tab = match self.get_target_tab() {
             Some(tab) => tab,
             None => return,
         };
@@ -3382,9 +3402,7 @@ impl TermWindow {
     }
 
     fn get_active_pane_no_overlay(&self) -> Option<Arc<dyn Pane>> {
-        let mux = Mux::get();
-        mux.get_active_tab_for_window(self.mux_window_id)
-            .and_then(|tab| tab.get_active_pane())
+        self.get_target_tab().and_then(|tab| tab.get_active_pane())
     }
 
     /// Returns a Pane that we can interact with; this will typically be
@@ -3392,7 +3410,8 @@ impl TermWindow {
     /// overlay (such as the launcher / tab navigator),
     /// then that will be returned instead.  Otherwise, if the pane has
     /// an active overlay (such as search or copy mode) then that will
-    /// be returned.
+    /// be returned. A focused float takes the place of the tab, unless a
+    /// leader key assignment is being performed.
     pub fn get_active_pane_or_overlay(&self) -> Option<Arc<dyn Pane>> {
         let mux = Mux::get();
         let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
@@ -3402,15 +3421,17 @@ impl TermWindow {
 
         let tab_id = tab.tab_id();
 
-        if let Some(tab_overlay) = self
+        // Not inlined into the `if let`: its borrow of tab_state would
+        // outlive the condition, and get_target_tab borrows it again
+        let tab_overlay = self
             .tab_state(tab_id)
             .overlay
             .as_ref()
-            .map(|overlay| overlay.pane.clone())
-        {
+            .map(|overlay| overlay.pane.clone());
+        if let Some(tab_overlay) = tab_overlay {
             Some(tab_overlay)
         } else {
-            let pane = tab.get_active_pane()?;
+            let pane = self.get_target_tab()?.get_active_pane()?;
             let pane_id = pane.pane_id();
             self.pane_state(pane_id)
                 .overlay
@@ -3535,7 +3556,14 @@ impl TermWindow {
             None => return vec![],
         };
 
-        self.get_pos_panes_for_tab(&tab)
+        let mut panes = self.get_pos_panes_for_tab(&tab);
+        if self.get_active_float().is_some() {
+            // The focused float has the cursor, not the pane underneath it
+            for p in &mut panes {
+                p.is_active = false;
+            }
+        }
+        panes
     }
 
     /// if pane_id.is_none(), removes any overlay for the specified tab.

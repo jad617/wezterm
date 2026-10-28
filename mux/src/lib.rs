@@ -101,6 +101,8 @@ static LAST_SUBSCRIBER_ID: AtomicUsize = AtomicUsize::new(0);
 
 pub struct Mux {
     tabs: RwLock<HashMap<TabId, Arc<Tab>>>,
+    /// Maps the tab of a floating layout to the tab it floats over
+    float_parents: RwLock<HashMap<TabId, TabId>>,
     panes: RwLock<HashMap<PaneId, Arc<dyn Pane>>>,
     windows: RwLock<HashMap<WindowId, Window>>,
     default_domain: RwLock<Option<Arc<dyn Domain>>>,
@@ -444,6 +446,7 @@ impl Mux {
 
         Self {
             tabs: RwLock::new(HashMap::new()),
+            float_parents: RwLock::new(HashMap::new()),
             panes: RwLock::new(HashMap::new()),
             windows: RwLock::new(HashMap::new()),
             default_domain: RwLock::new(default_domain),
@@ -830,12 +833,34 @@ impl Mux {
         if changed {
             self.recompute_pane_count();
         }
+
+        // A float can't outlive the pane that it is displayed over
+        let tabs: Vec<Arc<Tab>> = self.tabs.read().values().cloned().collect();
+        for tab in tabs {
+            for float in tab.take_floats(|f| f.owner == pane_id) {
+                self.remove_tab_internal(float.tab.tab_id());
+            }
+        }
     }
 
     fn remove_tab_internal(&self, tab_id: TabId) -> Option<Arc<Tab>> {
         log::debug!("remove_tab_internal tab {}", tab_id);
 
         let tab = self.tabs.write().remove(&tab_id)?;
+
+        // Detach it from the tab that it floats over, if it is a float,
+        // and take its own floats down with it
+        if let Some(parent_id) = self.float_parents.write().remove(&tab_id) {
+            if let Some(parent) = self.get_tab(parent_id) {
+                parent.take_floats(|f| f.tab.tab_id() == tab_id);
+                if let Some(window_id) = self.window_containing_tab(parent_id) {
+                    self.notify(MuxNotification::WindowInvalidated(window_id));
+                }
+            }
+        }
+        for float in tab.take_floats(|_| true) {
+            self.remove_tab_internal(float.tab.tab_id());
+        }
 
         if let Some(mut windows) = self.windows.try_write() {
             for w in windows.values_mut() {
@@ -925,6 +950,14 @@ impl Mux {
                 if win.is_empty() {
                     log::trace!("prune_dead_windows: window is now empty");
                     dead_windows.push(*window_id);
+                }
+            }
+
+            // Floats aren't part of any window, so prune their panes here
+            let float_ids: Vec<TabId> = self.float_parents.read().keys().copied().collect();
+            for float_id in float_ids {
+                if let Some(float) = self.get_tab(float_id) {
+                    float.prune_dead_panes();
                 }
             }
 
@@ -1022,7 +1055,58 @@ impl Mux {
                 }
             }
         }
-        None
+        // A float belongs to the window of the tab that it floats over
+        let parent_id = self.float_parents.read().get(&tab_id).copied()?;
+        self.window_containing_tab(parent_id)
+    }
+
+    /// Anchors `float`, whose panes must already be known to the mux,
+    /// as a visible floating layout over the `owner` pane of `parent`
+    pub fn add_float(&self, parent: &Arc<Tab>, owner: PaneId, float: &Arc<Tab>) {
+        self.tabs.write().insert(float.tab_id(), Arc::clone(float));
+        self.float_parents
+            .write()
+            .insert(float.tab_id(), parent.tab_id());
+        for old in parent.take_floats(|f| f.owner == owner) {
+            self.remove_tab_internal(old.tab.tab_id());
+        }
+        parent.add_float(owner, Arc::clone(float));
+        if let Some(window_id) = self.window_containing_tab(parent.tab_id()) {
+            self.notify(MuxNotification::WindowInvalidated(window_id));
+        }
+    }
+
+    /// Spawns the default program in a new floating layout over the
+    /// `owner` pane of `parent`, starting in the owner's working directory
+    pub async fn spawn_float(
+        &self,
+        parent: &Arc<Tab>,
+        owner: &Arc<dyn Pane>,
+        size: TerminalSize,
+    ) -> anyhow::Result<Arc<Tab>> {
+        let domain = self
+            .get_domain(owner.domain_id())
+            .ok_or_else(|| anyhow!("domain {} of pane {} not found", owner.domain_id(), owner.pane_id()))?;
+        let command_dir = self.resolve_cwd(
+            None,
+            Some(Arc::clone(owner)),
+            domain.domain_id(),
+            CachePolicy::FetchImmediate,
+        );
+        let pane = domain.spawn_pane(size, None, command_dir).await?;
+        if let Some(config) = owner.get_config() {
+            pane.set_config(config);
+        }
+        let float = Arc::new(Tab::new(&size));
+        float.assign_pane(&pane);
+        self.add_float(parent, owner.pane_id(), &float);
+        Ok(float)
+    }
+
+    /// Returns the tab that `tab_id` floats over, if it is a float
+    pub fn get_float_parent(&self, tab_id: TabId) -> Option<Arc<Tab>> {
+        let parent_id = self.float_parents.read().get(&tab_id).copied()?;
+        self.get_tab(parent_id)
     }
 
     pub fn is_empty(&self) -> bool {

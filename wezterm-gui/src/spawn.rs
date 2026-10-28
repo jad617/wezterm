@@ -3,6 +3,7 @@ use config::keyassignment::SpawnCommand;
 use config::TermConfig;
 use mux::activity::Activity;
 use mux::domain::SplitSource;
+use mux::pane::PaneId;
 use mux::tab::SplitRequest;
 use mux::window::WindowId as MuxWindowId;
 use mux::Mux;
@@ -15,6 +16,9 @@ pub enum SpawnWhere {
     NewWindow,
     NewTab,
     SplitPane(SplitRequest),
+    /// Split a specific pane, which may be part of a float rather than
+    /// of the window's active tab
+    SplitPaneOf(PaneId, SplitRequest),
 }
 
 pub fn spawn_command_impl(
@@ -93,6 +97,21 @@ pub async fn spawn_command_internal(
     let workspace = mux.active_workspace().clone();
 
     match spawn_where {
+        SpawnWhere::SplitPaneOf(pane_id, direction) => {
+            let (pane, _size) = mux
+                .split_pane(
+                    pane_id,
+                    direction,
+                    SplitSource::Spawn {
+                        command: cmd_builder,
+                        command_dir: cwd,
+                    },
+                    spawn.domain,
+                )
+                .await
+                .context("split_pane")?;
+            pane.set_config(term_config);
+        }
         SpawnWhere::SplitPane(direction) => {
             let src_window_id = match src_window_id {
                 Some(id) => id,

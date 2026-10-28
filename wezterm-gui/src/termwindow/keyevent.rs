@@ -251,19 +251,7 @@ impl super::TermWindow {
         if is_down && !leader_active {
             // Check to see if this key-press is the leader activating
             if let Some(duration) = self.input_map.is_leader(&keycode, raw_modifiers) {
-                // Yes; record its expiration
-                let target = std::time::Instant::now() + duration;
-                self.leader_is_down.replace(target);
-                self.update_title();
-                // schedule an invalidation so that the cursor or status
-                // area will be repainted at the right time
-                if let Some(window) = self.window.clone() {
-                    promise::spawn::spawn(async move {
-                        Timer::at(target).await;
-                        window.invalidate();
-                    })
-                    .detach();
-                }
+                self.activate_leader(duration);
                 return true;
             }
         }
@@ -305,19 +293,42 @@ impl super::TermWindow {
                 }
 
                 self.key_table_state.did_process_key();
-                let handled = match self.perform_key_assignment(&pane, &entry.action) {
+
+                // Leader key assignments act on the tab's own split layout
+                // rather than on a focused float, unless FloatingPaneLeader
+                // came first
+                let float_leader = std::mem::take(&mut self.float_leader_pending);
+                self.action_targets_tab = leader_active && !float_leader;
+                let target_pane = if self.action_targets_tab {
+                    self.get_active_pane_or_overlay()
+                        .unwrap_or_else(|| Arc::clone(pane))
+                } else {
+                    Arc::clone(pane)
+                };
+                let handled = match self.perform_key_assignment(&target_pane, &entry.action) {
                     Ok(PerformAssignmentResult::Handled) => true,
                     Err(_) => true,
                     Ok(_) => false,
                 };
+                self.action_targets_tab = false;
 
                 if handled {
                     context.invalidate();
 
                     if leader_active {
-                        // A successful leader key-lookup cancels the leader
-                        // virtual modifier state
-                        self.leader_done();
+                        if self.float_leader_pending {
+                            // FloatingPaneLeader keeps the leader active so
+                            // that the next key can act on the float
+                            if let Some(leader) = self.config.leader.as_ref() {
+                                self.activate_leader(std::time::Duration::from_millis(
+                                    leader.timeout_milliseconds,
+                                ));
+                            }
+                        } else {
+                            // A successful leader key-lookup cancels the
+                            // leader virtual modifier state
+                            self.leader_done();
+                        }
                     }
 
                     return true;
@@ -588,8 +599,25 @@ impl super::TermWindow {
         &self.dead_key_status
     }
 
+    fn activate_leader(&mut self, duration: std::time::Duration) {
+        // Record its expiration
+        let target = std::time::Instant::now() + duration;
+        self.leader_is_down.replace(target);
+        self.update_title();
+        // schedule an invalidation so that the cursor or status
+        // area will be repainted at the right time
+        if let Some(window) = self.window.clone() {
+            promise::spawn::spawn(async move {
+                Timer::at(target).await;
+                window.invalidate();
+            })
+            .detach();
+        }
+    }
+
     fn leader_done(&mut self) {
         self.leader_is_down.take();
+        self.float_leader_pending = false;
         self.update_title();
         if let Some(window) = &self.window {
             window.invalidate();

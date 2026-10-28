@@ -268,6 +268,18 @@ impl crate::TermWindow {
             }
         }
 
+        {
+            // Floats go on a layer of their own so that they are drawn
+            // over the panes underneath them
+            let gl_state = self.render_state.as_ref().unwrap();
+            let float_layer = gl_state
+                .layer_for_zindex(2)
+                .context("layer_for_zindex(2)")?;
+            let mut float_layers = float_layer.quad_allocator();
+            self.paint_floats(&mut float_layers, focused)
+                .context("paint_floats")?;
+        }
+
         if self.show_tab_bar {
             self.paint_tab_bar(&mut layers).context("paint_tab_bar")?;
         }

@@ -599,6 +599,13 @@ pub enum KeyAssignment {
     ActivatePaneDirection(PaneDirection),
     ActivatePaneByIndex(usize),
     TogglePaneZoomState,
+    /// Shows or hides the floating split layout of the active pane,
+    /// creating it in the pane's working directory if it doesn't exist
+    ToggleFloatingPane,
+    /// Activates the leader so that the next leader key assignment acts
+    /// on the focused floating split layout rather than on the pane that
+    /// it floats over
+    FloatingPaneLeader,
     SetPaneZoomState(bool),
     CloseCurrentPane {
         confirm: bool,
