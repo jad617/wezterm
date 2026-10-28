@@ -2612,6 +2612,10 @@ impl TermWindow {
             result => return Ok(result),
         }
 
+        if self.perform_float_tab_assignment(assignment) {
+            return Ok(PerformAssignmentResult::Handled);
+        }
+
         let window = self.window.as_ref().map(|w| w.clone());
 
         match assignment {

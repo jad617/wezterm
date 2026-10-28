@@ -1,19 +1,23 @@
 //! Floating split layouts.
 //!
-//! Each pane of a tab can have a float: a split layout of its own that is
-//! displayed over the pane, inset by `floating_pane_padding`, with an index
-//! bar along its bottom row. The float of the active pane has keyboard
-//! focus while it is visible. Leader key assignments keep acting on the
-//! tab's own layout underneath, except after `FloatingPaneLeader`, which
-//! makes the next one act on the float instead.
+//! Each pane of a tab can have a float: a set of tabs of its own, each
+//! with its own split layout, displayed over the pane, inset by
+//! `floating_pane_padding`, with a bar listing its tabs along its bottom
+//! row. The float of the active pane has keyboard focus while it is
+//! visible. Leader key assignments keep acting on the window underneath,
+//! except after `FloatingPaneLeader`, which makes the next one act on the
+//! float instead: pane assignments on its active tab, and tab assignments
+//! on its tabs.
 
 use crate::quad::TripleLayerQuadAllocator;
 use crate::termwindow::render::RenderScreenLineParams;
 use ::window::{RectF, WindowOps};
+use config::keyassignment::{KeyAssignment, SpawnCommand};
 use config::{DimensionContext, TabBarColors};
 use mux::renderable::RenderableDimensions;
 use mux::tab::{Float, PositionedPane, PositionedSplit, Tab};
 use mux::Mux;
+use portable_pty::CommandBuilder;
 use std::sync::Arc;
 use termwiz::cell::CellAttributes;
 use termwiz::color::ColorSpec;
@@ -223,8 +227,12 @@ impl crate::TermWindow {
             };
             let (_, _, width, height) = self.float_area(&pos);
             let size = self.float_terminal_size(width, height);
+            let owner_id = owner.pane_id();
             promise::spawn::spawn(async move {
-                if let Err(err) = Mux::get().spawn_float(&tab, &owner, size).await {
+                if let Err(err) = Mux::get()
+                    .spawn_float_tab(&tab, owner_id, &owner, None, None, size)
+                    .await
+                {
                     log::error!("Failed to spawn floating pane: {:#}", err);
                 }
             })
@@ -234,6 +242,85 @@ impl crate::TermWindow {
         if let Some(window) = self.window.as_ref() {
             window.invalidate();
         }
+    }
+
+    /// Performs tab key assignments on the tabs of the focused float when
+    /// it is their target, returning true if the assignment was handled
+    pub fn perform_float_tab_assignment(&mut self, assignment: &KeyAssignment) -> bool {
+        use KeyAssignment::*;
+        if self.action_targets_tab {
+            return false;
+        }
+        let float = match self.get_active_float() {
+            Some(float) => float,
+            None => return false,
+        };
+        let parent = match Mux::get().get_active_tab_for_window(self.mux_window_id) {
+            Some(tab) => tab,
+            None => return false,
+        };
+        let num_tabs = float.tabs.len() as isize;
+        let active = float.active_tab as isize;
+
+        match assignment {
+            SpawnTab(_) => self.spawn_float_tab(&parent, &float, &SpawnCommand::default()),
+            SpawnCommandInNewTab(spawn) => self.spawn_float_tab(&parent, &float, spawn),
+            ActivateTabRelative(delta) => {
+                let index = (active + delta).rem_euclid(num_tabs);
+                parent.set_active_float_tab(float.owner, index as usize);
+            }
+            ActivateTabRelativeNoWrap(delta) => {
+                let index = (active + delta).clamp(0, num_tabs - 1);
+                parent.set_active_float_tab(float.owner, index as usize);
+            }
+            ActivateTab(index) => {
+                let index = if *index < 0 { num_tabs + index } else { *index };
+                if index >= 0 && index < num_tabs {
+                    parent.set_active_float_tab(float.owner, index as usize);
+                }
+            }
+            CloseCurrentTab { .. } => {
+                Mux::get().remove_tab(float.tab.tab_id());
+            }
+            _ => return false,
+        }
+
+        if let Some(window) = self.window.as_ref() {
+            window.invalidate();
+        }
+        true
+    }
+
+    /// Spawns `spawn` in a new tab of `float`, starting in the working
+    /// directory of the float's active pane unless `spawn` specifies one
+    fn spawn_float_tab(&self, parent: &Arc<Tab>, float: &Float, spawn: &SpawnCommand) {
+        let cwd_pane = match float.tab.get_active_pane() {
+            Some(pane) => pane,
+            None => return,
+        };
+        let command = spawn.args.as_ref().map(|args| {
+            let mut builder = CommandBuilder::from_argv(args.iter().map(Into::into).collect());
+            for (k, v) in spawn.set_environment_variables.iter() {
+                builder.env(k, v);
+            }
+            builder
+        });
+        let command_dir = spawn
+            .cwd
+            .as_ref()
+            .and_then(|cwd| cwd.to_str().map(|s| s.to_owned()));
+        let size = float.tab.get_size();
+        let parent = Arc::clone(parent);
+        let owner = float.owner;
+        promise::spawn::spawn(async move {
+            if let Err(err) = Mux::get()
+                .spawn_float_tab(&parent, owner, &cwd_pane, command, command_dir, size)
+                .await
+            {
+                log::error!("Failed to spawn floating pane tab: {:#}", err);
+            }
+        })
+        .detach();
     }
 
     /// Converts an area in window cell coordinates to pixels
@@ -314,8 +401,8 @@ impl crate::TermWindow {
         Ok(())
     }
 
-    /// Paints the index bar along the bottom row of a float, listing its
-    /// panes by the index that ActivatePaneByIndex uses
+    /// Paints the bar along the bottom row of a float, listing its tabs by
+    /// the index that ActivateTab uses
     fn paint_float_index_bar(
         &mut self,
         float: &PositionedFloat,
@@ -332,23 +419,22 @@ impl crate::TermWindow {
             .clone();
 
         let mut line = Line::from_text("", &background, SEQ_ZERO, None);
-        // List every pane by its real index; a zoomed layout only lays out
-        // the zoomed pane, and reports it as index 0
-        let tab = &float.float.tab;
-        let zoomed_id = tab.get_zoomed_pane().map(|p| p.pane_id());
-        for pos in tab.iter_panes_ignoring_zoom() {
-            let is_active = pos.index == tab.get_active_idx();
-            let attrs = if is_active {
+        for (index, tab) in float.float.tabs.iter().enumerate() {
+            let attrs = if index == float.float.active_tab {
                 colors.active_tab().as_cell_attributes()
             } else {
                 colors.inactive_tab().as_cell_attributes()
             };
-            let zoomed = if Some(pos.pane.pane_id()) == zoomed_id {
+            let title = tab
+                .get_active_pane()
+                .map(|p| p.get_title())
+                .unwrap_or_default();
+            let zoomed = if tab.get_zoomed_pane().is_some() {
                 " [Z]"
             } else {
                 ""
             };
-            let label = format!(" {}: {}{} ", pos.index, pos.pane.get_title(), zoomed);
+            let label = format!(" {}: {}{} ", index, title, zoomed);
             line.append_line(Line::from_text(&label, &attrs, SEQ_ZERO, None), SEQ_ZERO);
         }
         // Fill the rest of the row with the bar background, then clip

@@ -48,22 +48,53 @@ struct TabInner {
     recency: Recency,
 }
 
-/// A floating split layout displayed over one of the panes of a Tab
+/// A float displayed over one of the panes of a Tab: a set of tabs of
+/// its own, each with its own split layout. The float tabs are registered
+/// with the mux but are not part of any window.
+struct FloatEntry {
+    owner: PaneId,
+    tabs: Vec<Arc<Tab>>,
+    active: usize,
+    visible: bool,
+}
+
+/// A snapshot of a float
 #[derive(Clone)]
 pub struct Float {
     /// The pane of the parent tab that the float is displayed over
     pub owner: PaneId,
-    /// The float's own split layout. It is registered with the mux but
-    /// is not part of any window.
+    /// The float's active tab
     pub tab: Arc<Tab>,
+    /// All of the float's tabs; `tab` is `tabs[active_tab]`
+    pub tabs: Vec<Arc<Tab>>,
+    pub active_tab: usize,
     pub visible: bool,
+}
+
+impl FloatEntry {
+    /// Returns a snapshot of the float, or None if all of its tabs died
+    fn snapshot(&self) -> Option<Float> {
+        let active_id = self.tabs.get(self.active).map(|t| t.tab_id());
+        let tabs: Vec<Arc<Tab>> = self.tabs.iter().filter(|t| !t.is_dead()).cloned().collect();
+        let active_tab = tabs
+            .iter()
+            .position(|t| Some(t.tab_id()) == active_id)
+            .unwrap_or(0);
+        Some(Float {
+            owner: self.owner,
+            tab: Arc::clone(tabs.get(active_tab)?),
+            tabs,
+            active_tab,
+            visible: self.visible,
+        })
+    }
 }
 
 /// A Tab is a container of Panes
 pub struct Tab {
     inner: Mutex<TabInner>,
     tab_id: TabId,
-    floats: Mutex<Vec<Float>>,
+    floats: Mutex<Vec<FloatEntry>>,
 }
 
 #[derive(Clone)]
@@ -534,8 +565,8 @@ impl Tab {
         self.floats
             .lock()
             .iter()
-            .find(|f| f.owner == owner && !f.tab.is_dead())
-            .cloned()
+            .find(|f| f.owner == owner)
+            .and_then(FloatEntry::snapshot)
     }
 
     /// Returns the live floats of this tab, visible or not
@@ -543,8 +574,7 @@ impl Tab {
         self.floats
             .lock()
             .iter()
-            .filter(|f| !f.tab.is_dead())
-            .cloned()
+            .filter_map(FloatEntry::snapshot)
             .collect()
     }
 
@@ -555,17 +585,25 @@ impl Tab {
         self.get_float(active).filter(|f| f.visible)
     }
 
-    /// Anchors `tab` as a visible float over the `owner` pane, replacing
-    /// any existing float for that pane. Use `Mux::add_float` rather than
-    /// calling this directly so that the mux can track the float.
-    pub fn add_float(&self, owner: PaneId, tab: Arc<Tab>) {
+    /// Adds `tab` as the active tab of the float over the `owner` pane,
+    /// creating the float if needed, and shows it. Use `Mux::add_float_tab`
+    /// rather than calling this directly so that the mux can track it.
+    pub fn add_float_tab(&self, owner: PaneId, tab: Arc<Tab>) {
         let mut floats = self.floats.lock();
-        floats.retain(|f| f.owner != owner);
-        floats.push(Float {
-            owner,
-            tab,
-            visible: true,
-        });
+        match floats.iter_mut().find(|f| f.owner == owner) {
+            Some(f) => {
+                f.tabs.retain(|t| !t.is_dead());
+                f.tabs.insert((f.active + 1).min(f.tabs.len()), tab);
+                f.active = (f.active + 1).min(f.tabs.len() - 1);
+                f.visible = true;
+            }
+            None => floats.push(FloatEntry {
+                owner,
+                tabs: vec![tab],
+                active: 0,
+                visible: true,
+            }),
+        }
     }
 
     pub fn set_float_visible(&self, owner: PaneId, visible: bool) {
@@ -576,12 +614,47 @@ impl Tab {
         }
     }
 
-    /// Removes and returns the floats whose float tab or owner pane
-    /// matches `pred`
-    pub fn take_floats<F: Fn(&Float) -> bool>(&self, pred: F) -> Vec<Float> {
+    /// Activates the tab at `index` of the float over `owner`
+    pub fn set_active_float_tab(&self, owner: PaneId, index: usize) {
+        for f in self.floats.lock().iter_mut() {
+            if f.owner == owner && index < f.tabs.len() {
+                f.active = index;
+            }
+        }
+    }
+
+    /// Removes a tab from whichever float it belongs to, activating its
+    /// neighbor and dropping the float once it has no tabs left. Returns
+    /// true if the tab was found.
+    pub fn remove_float_tab(&self, tab_id: TabId) -> bool {
         let mut floats = self.floats.lock();
-        let (taken, kept) = floats.drain(..).partition(|f| pred(f));
-        *floats = kept;
+        let mut found = false;
+        for f in floats.iter_mut() {
+            if let Some(idx) = f.tabs.iter().position(|t| t.tab_id() == tab_id) {
+                f.tabs.remove(idx);
+                if f.active > idx || f.active >= f.tabs.len() {
+                    f.active = f.active.saturating_sub(1);
+                }
+                found = true;
+            }
+        }
+        floats.retain(|f| !f.tabs.is_empty());
+        found
+    }
+
+    /// Removes the floats anchored to `owner`, returning their tabs, or the
+    /// tabs of all floats if `owner` is None
+    pub fn take_float_tabs(&self, owner: Option<PaneId>) -> Vec<Arc<Tab>> {
+        let mut floats = self.floats.lock();
+        let mut taken = vec![];
+        floats.retain_mut(|f| {
+            if owner.map(|o| o == f.owner).unwrap_or(true) {
+                taken.append(&mut f.tabs);
+                false
+            } else {
+                true
+            }
+        });
         taken
     }
 

@@ -837,8 +837,8 @@ impl Mux {
         // A float can't outlive the pane that it is displayed over
         let tabs: Vec<Arc<Tab>> = self.tabs.read().values().cloned().collect();
         for tab in tabs {
-            for float in tab.take_floats(|f| f.owner == pane_id) {
-                self.remove_tab_internal(float.tab.tab_id());
+            for float_tab in tab.take_float_tabs(Some(pane_id)) {
+                self.remove_tab_internal(float_tab.tab_id());
             }
         }
     }
@@ -852,14 +852,14 @@ impl Mux {
         // and take its own floats down with it
         if let Some(parent_id) = self.float_parents.write().remove(&tab_id) {
             if let Some(parent) = self.get_tab(parent_id) {
-                parent.take_floats(|f| f.tab.tab_id() == tab_id);
+                parent.remove_float_tab(tab_id);
                 if let Some(window_id) = self.window_containing_tab(parent_id) {
                     self.notify(MuxNotification::WindowInvalidated(window_id));
                 }
             }
         }
-        for float in tab.take_floats(|_| true) {
-            self.remove_tab_internal(float.tab.tab_id());
+        for float_tab in tab.take_float_tabs(None) {
+            self.remove_tab_internal(float_tab.tab_id());
         }
 
         if let Some(mut windows) = self.windows.try_write() {
@@ -1060,46 +1060,51 @@ impl Mux {
         self.window_containing_tab(parent_id)
     }
 
-    /// Anchors `float`, whose panes must already be known to the mux,
-    /// as a visible floating layout over the `owner` pane of `parent`
-    pub fn add_float(&self, parent: &Arc<Tab>, owner: PaneId, float: &Arc<Tab>) {
+    /// Adds `float`, whose panes must already be known to the mux, as the
+    /// active tab of the float over the `owner` pane of `parent`
+    pub fn add_float_tab(&self, parent: &Arc<Tab>, owner: PaneId, float: &Arc<Tab>) {
         self.tabs.write().insert(float.tab_id(), Arc::clone(float));
         self.float_parents
             .write()
             .insert(float.tab_id(), parent.tab_id());
-        for old in parent.take_floats(|f| f.owner == owner) {
-            self.remove_tab_internal(old.tab.tab_id());
-        }
-        parent.add_float(owner, Arc::clone(float));
+        parent.add_float_tab(owner, Arc::clone(float));
         if let Some(window_id) = self.window_containing_tab(parent.tab_id()) {
             self.notify(MuxNotification::WindowInvalidated(window_id));
         }
     }
 
-    /// Spawns the default program in a new floating layout over the
-    /// `owner` pane of `parent`, starting in the owner's working directory
-    pub async fn spawn_float(
+    /// Spawns a new tab in the float over the `owner` pane of `parent`,
+    /// creating the float if needed. The command defaults to the default
+    /// program, and the directory to the working directory of `cwd_pane`.
+    pub async fn spawn_float_tab(
         &self,
         parent: &Arc<Tab>,
-        owner: &Arc<dyn Pane>,
+        owner: PaneId,
+        cwd_pane: &Arc<dyn Pane>,
+        command: Option<CommandBuilder>,
+        command_dir: Option<String>,
         size: TerminalSize,
     ) -> anyhow::Result<Arc<Tab>> {
-        let domain = self
-            .get_domain(owner.domain_id())
-            .ok_or_else(|| anyhow!("domain {} of pane {} not found", owner.domain_id(), owner.pane_id()))?;
+        let domain = self.get_domain(cwd_pane.domain_id()).ok_or_else(|| {
+            anyhow!(
+                "domain {} of pane {} not found",
+                cwd_pane.domain_id(),
+                cwd_pane.pane_id()
+            )
+        })?;
         let command_dir = self.resolve_cwd(
-            None,
-            Some(Arc::clone(owner)),
+            command_dir,
+            Some(Arc::clone(cwd_pane)),
             domain.domain_id(),
             CachePolicy::FetchImmediate,
         );
-        let pane = domain.spawn_pane(size, None, command_dir).await?;
-        if let Some(config) = owner.get_config() {
+        let pane = domain.spawn_pane(size, command, command_dir).await?;
+        if let Some(config) = cwd_pane.get_config() {
             pane.set_config(config);
         }
         let float = Arc::new(Tab::new(&size));
         float.assign_pane(&pane);
-        self.add_float(parent, owner.pane_id(), &float);
+        self.add_float_tab(parent, owner, &float);
         Ok(float)
     }
 
