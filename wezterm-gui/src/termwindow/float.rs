@@ -12,7 +12,7 @@
 use crate::quad::TripleLayerQuadAllocator;
 use crate::termwindow::render::RenderScreenLineParams;
 use ::window::{RectF, WindowOps};
-use config::keyassignment::{KeyAssignment, SpawnCommand};
+use config::keyassignment::{FloatingPaneKey, KeyAssignment, SpawnCommand};
 use config::{DimensionContext, TabBarColors};
 use mux::renderable::RenderableDimensions;
 use mux::tab::{Float, PositionedPane, PositionedSplit, Tab};
@@ -199,9 +199,10 @@ impl crate::TermWindow {
         floats
     }
 
-    /// Hides the focused float, or shows the float of the active pane,
-    /// spawning one in the pane's working directory if it has none
-    pub fn toggle_floating_pane(&mut self) {
+    /// Hides the focused float, or shows the float of the active pane with
+    /// `keyed`'s key ("" without one), spawning it in `keyed`'s directory,
+    /// else the pane's working directory, if the pane has none
+    pub fn toggle_floating_pane(&mut self, keyed: Option<&FloatingPaneKey>) {
         let tab = match Mux::get().get_active_tab_for_window(self.mux_window_id) {
             Some(tab) => tab,
             None => return,
@@ -214,8 +215,11 @@ impl crate::TermWindow {
             None => return,
         };
 
-        if let Some(float) = tab.get_float(owner.pane_id()) {
-            tab.set_float_visible(float.owner, !float.visible);
+        let key = keyed.map(|k| k.key.as_str()).unwrap_or("");
+        if let Some(float) = tab.get_visible_float(owner.pane_id()) {
+            tab.set_float_visible(float.owner, &float.key, false);
+        } else if let Some(float) = tab.get_float(owner.pane_id(), key) {
+            tab.set_float_visible(float.owner, &float.key, true);
         } else {
             let pos = match tab
                 .iter_panes()
@@ -228,9 +232,11 @@ impl crate::TermWindow {
             let (_, _, width, height) = self.float_area(&pos);
             let size = self.float_terminal_size(width, height);
             let owner_id = owner.pane_id();
+            let key = key.to_string();
+            let cwd = keyed.and_then(|k| k.cwd.clone());
             promise::spawn::spawn(async move {
                 if let Err(err) = Mux::get()
-                    .spawn_float_tab(&tab, owner_id, &owner, None, None, size)
+                    .spawn_float_tab(&tab, owner_id, &key, &owner, None, cwd, size)
                     .await
                 {
                     log::error!("Failed to spawn floating pane: {:#}", err);
@@ -267,16 +273,16 @@ impl crate::TermWindow {
             SpawnCommandInNewTab(spawn) => self.spawn_float_tab(&parent, &float, spawn),
             ActivateTabRelative(delta) => {
                 let index = (active + delta).rem_euclid(num_tabs);
-                parent.set_active_float_tab(float.owner, index as usize);
+                parent.set_active_float_tab(float.owner, &float.key, index as usize);
             }
             ActivateTabRelativeNoWrap(delta) => {
                 let index = (active + delta).clamp(0, num_tabs - 1);
-                parent.set_active_float_tab(float.owner, index as usize);
+                parent.set_active_float_tab(float.owner, &float.key, index as usize);
             }
             ActivateTab(index) => {
                 let index = if *index < 0 { num_tabs + index } else { *index };
                 if index >= 0 && index < num_tabs {
-                    parent.set_active_float_tab(float.owner, index as usize);
+                    parent.set_active_float_tab(float.owner, &float.key, index as usize);
                 }
             }
             CloseCurrentTab { .. } => {
@@ -312,9 +318,10 @@ impl crate::TermWindow {
         let size = float.tab.get_size();
         let parent = Arc::clone(parent);
         let owner = float.owner;
+        let key = float.key.clone();
         promise::spawn::spawn(async move {
             if let Err(err) = Mux::get()
-                .spawn_float_tab(&parent, owner, &cwd_pane, command, command_dir, size)
+                .spawn_float_tab(&parent, owner, &key, &cwd_pane, command, command_dir, size)
                 .await
             {
                 log::error!("Failed to spawn floating pane tab: {:#}", err);

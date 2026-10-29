@@ -1062,12 +1062,12 @@ impl Mux {
 
     /// Adds `float`, whose panes must already be known to the mux, as the
     /// active tab of the float over the `owner` pane of `parent`
-    pub fn add_float_tab(&self, parent: &Arc<Tab>, owner: PaneId, float: &Arc<Tab>) {
+    pub fn add_float_tab(&self, parent: &Arc<Tab>, owner: PaneId, key: &str, float: &Arc<Tab>) {
         self.tabs.write().insert(float.tab_id(), Arc::clone(float));
         self.float_parents
             .write()
             .insert(float.tab_id(), parent.tab_id());
-        parent.add_float_tab(owner, Arc::clone(float));
+        parent.add_float_tab(owner, key, Arc::clone(float));
         if let Some(window_id) = self.window_containing_tab(parent.tab_id()) {
             self.notify(MuxNotification::WindowInvalidated(window_id));
         }
@@ -1080,6 +1080,7 @@ impl Mux {
         &self,
         parent: &Arc<Tab>,
         owner: PaneId,
+        key: &str,
         cwd_pane: &Arc<dyn Pane>,
         command: Option<CommandBuilder>,
         command_dir: Option<String>,
@@ -1104,7 +1105,7 @@ impl Mux {
         }
         let float = Arc::new(Tab::new(&size));
         float.assign_pane(&pane);
-        self.add_float_tab(parent, owner, &float);
+        self.add_float_tab(parent, owner, key, &float);
         Ok(float)
     }
 

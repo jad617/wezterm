@@ -3012,7 +3012,8 @@ impl TermWindow {
                     tab.activate_pane_direction(*direction);
                 }
             }
-            ToggleFloatingPane => self.toggle_floating_pane(),
+            ToggleFloatingPane => self.toggle_floating_pane(None),
+            ToggleFloatingPaneKeyed(k) => self.toggle_floating_pane(Some(k)),
             FloatingPaneLeader => {
                 if self.get_active_float().is_some() {
                     self.float_leader_pending = true;

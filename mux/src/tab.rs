@@ -53,6 +53,7 @@ struct TabInner {
 /// with the mux but are not part of any window.
 struct FloatEntry {
     owner: PaneId,
+    key: String,
     tabs: Vec<Arc<Tab>>,
     active: usize,
     visible: bool,
@@ -63,6 +64,8 @@ struct FloatEntry {
 pub struct Float {
     /// The pane of the parent tab that the float is displayed over
     pub owner: PaneId,
+    /// Tells apart the floats over the same pane ("" for the default one)
+    pub key: String,
     /// The float's active tab
     pub tab: Arc<Tab>,
     /// All of the float's tabs; `tab` is `tabs[active_tab]`
@@ -82,6 +85,7 @@ impl FloatEntry {
             .unwrap_or(0);
         Some(Float {
             owner: self.owner,
+            key: self.key.clone(),
             tab: Arc::clone(tabs.get(active_tab)?),
             tabs,
             active_tab,
@@ -560,12 +564,22 @@ impl Tab {
         }
     }
 
-    /// Returns the live float anchored to the specified pane, if any
-    pub fn get_float(&self, owner: PaneId) -> Option<Float> {
+    /// Returns the live float with `key` anchored to the specified pane, if any
+    pub fn get_float(&self, owner: PaneId, key: &str) -> Option<Float> {
         self.floats
             .lock()
             .iter()
-            .find(|f| f.owner == owner)
+            .find(|f| f.owner == owner && f.key == key)
+            .and_then(FloatEntry::snapshot)
+    }
+
+    /// Returns the visible float anchored to the specified pane, if any:
+    /// a pane shows at most one of its floats at a time
+    pub fn get_visible_float(&self, owner: PaneId) -> Option<Float> {
+        self.floats
+            .lock()
+            .iter()
+            .find(|f| f.owner == owner && f.visible)
             .and_then(FloatEntry::snapshot)
     }
 
@@ -582,42 +596,51 @@ impl Tab {
     /// anchored to the active pane of this tab
     pub fn get_active_float(&self) -> Option<Float> {
         let active = self.get_active_pane()?.pane_id();
-        self.get_float(active).filter(|f| f.visible)
+        self.get_visible_float(active)
     }
 
-    /// Adds `tab` as the active tab of the float over the `owner` pane,
-    /// creating the float if needed, and shows it. Use `Mux::add_float_tab`
-    /// rather than calling this directly so that the mux can track it.
-    pub fn add_float_tab(&self, owner: PaneId, tab: Arc<Tab>) {
+    /// Adds `tab` as the active tab of the float with `key` over the
+    /// `owner` pane, creating the float if needed, and shows it. Use
+    /// `Mux::add_float_tab` rather than calling this directly so that the
+    /// mux can track it.
+    pub fn add_float_tab(&self, owner: PaneId, key: &str, tab: Arc<Tab>) {
         let mut floats = self.floats.lock();
-        match floats.iter_mut().find(|f| f.owner == owner) {
+        match floats.iter_mut().find(|f| f.owner == owner && f.key == key) {
             Some(f) => {
                 f.tabs.retain(|t| !t.is_dead());
                 f.tabs.insert((f.active + 1).min(f.tabs.len()), tab);
                 f.active = (f.active + 1).min(f.tabs.len() - 1);
-                f.visible = true;
             }
             None => floats.push(FloatEntry {
                 owner,
+                key: key.to_string(),
                 tabs: vec![tab],
                 active: 0,
-                visible: true,
+                visible: false,
             }),
         }
+        drop(floats);
+        self.set_float_visible(owner, key, true);
     }
 
-    pub fn set_float_visible(&self, owner: PaneId, visible: bool) {
+    /// Shows or hides the float with `key` over `owner`; showing it hides
+    /// the pane's other floats
+    pub fn set_float_visible(&self, owner: PaneId, key: &str, visible: bool) {
         for f in self.floats.lock().iter_mut() {
             if f.owner == owner {
-                f.visible = visible;
+                if f.key == key {
+                    f.visible = visible;
+                } else if visible {
+                    f.visible = false;
+                }
             }
         }
     }
 
-    /// Activates the tab at `index` of the float over `owner`
-    pub fn set_active_float_tab(&self, owner: PaneId, index: usize) {
+    /// Activates the tab at `index` of the float with `key` over `owner`
+    pub fn set_active_float_tab(&self, owner: PaneId, key: &str, index: usize) {
         for f in self.floats.lock().iter_mut() {
-            if f.owner == owner && index < f.tabs.len() {
+            if f.owner == owner && f.key == key && index < f.tabs.len() {
                 f.active = index;
             }
         }

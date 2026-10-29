@@ -442,6 +442,16 @@ impl Default for CharSelectArguments {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
+pub struct FloatingPaneKey {
+    /// Tells apart the floats over a pane; the float spawned for a key is
+    /// shown again for that key
+    pub key: String,
+    /// Working directory for a newly spawned float; defaults to the pane's
+    #[dynamic(default)]
+    pub cwd: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
 pub struct QuickSelectArguments {
     /// Overrides the main quick_select_alphabet config
     #[dynamic(default)]
@@ -602,6 +612,10 @@ pub enum KeyAssignment {
     /// Shows or hides the floating split layout of the active pane,
     /// creating it in the pane's working directory if it doesn't exist
     ToggleFloatingPane,
+    /// Like ToggleFloatingPane, for one of several floats over the active
+    /// pane, told apart by `key` (e.g. one per Neovim window). Hides the
+    /// focused float instead, if there is one.
+    ToggleFloatingPaneKeyed(FloatingPaneKey),
     /// Activates the leader so that the next leader key assignment acts
     /// on the focused floating split layout rather than on the pane that
     /// it floats over
