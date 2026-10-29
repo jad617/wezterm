@@ -2,7 +2,9 @@ use crate::termwindow::render::TripleLayerQuadAllocator;
 use crate::termwindow::{UIItem, UIItemType};
 use mux::pane::Pane;
 use mux::tab::{PositionedSplit, SplitDirection};
+use ::window::RectF;
 use std::sync::Arc;
+use window::color::LinearRgba;
 
 impl crate::TermWindow {
     pub fn paint_split(
@@ -29,9 +31,8 @@ impl crate::TermWindow {
         let pos_x = split.left as f32 * cell_width + padding_left + border.left.get() as f32;
 
         if split.direction == SplitDirection::Horizontal {
-            self.filled_rectangle(
+            self.fill_split_line(
                 layers,
-                2,
                 euclid::rect(
                     pos_x + (cell_width / 2.0),
                     pos_y - (cell_height / 2.0),
@@ -52,9 +53,8 @@ impl crate::TermWindow {
                 item_type: UIItemType::Split(split.clone()),
             });
         } else {
-            self.filled_rectangle(
+            self.fill_split_line(
                 layers,
-                2,
                 euclid::rect(
                     pos_x - (cell_width / 2.0),
                     pos_y + (cell_height / 2.0),
@@ -76,6 +76,24 @@ impl crate::TermWindow {
             });
         }
 
+        Ok(())
+    }
+
+    /// Fills a split line, clipped to the float being painted, if any
+    fn fill_split_line(
+        &self,
+        layers: &mut TripleLayerQuadAllocator,
+        rect: RectF,
+        color: LinearRgba,
+    ) -> anyhow::Result<()> {
+        let rect = match self.float_paint_area {
+            Some(area) => match rect.intersection(&area) {
+                Some(rect) => rect,
+                None => return Ok(()),
+            },
+            None => rect,
+        };
+        self.filled_rectangle(layers, 2, rect, color)?;
         Ok(())
     }
 }

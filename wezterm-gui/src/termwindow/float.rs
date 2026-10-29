@@ -397,11 +397,25 @@ impl crate::TermWindow {
             result?;
 
             // Dragging a split resizes the window's tab, so the float's own
-            // splits are drawn without registering them for dragging
+            // splits are drawn without registering them for dragging. Split
+            // lines overshoot their ends by half a cell, so they are clipped
+            // to the float's panes (all but the index bar row).
             let num_ui_items = self.ui_items.len();
+            self.float_paint_area = Some(self.cell_area_to_pixels(
+                float.left,
+                float.top,
+                float.width,
+                float.height.saturating_sub(1).max(1),
+            )?);
+            let mut result = Ok(());
             for split in &float.splits {
-                self.paint_split(layers, split, &float.owner.pane)?;
+                result = self.paint_split(layers, split, &float.owner.pane);
+                if result.is_err() {
+                    break;
+                }
             }
+            self.float_paint_area = None;
+            result?;
             self.ui_items.truncate(num_ui_items);
 
             self.paint_float_index_bar(&float, layers)?;
