@@ -3014,6 +3014,15 @@ impl TermWindow {
             }
             ToggleFloatingPane => self.toggle_floating_pane(None),
             ToggleFloatingPaneKeyed(k) => self.toggle_floating_pane(Some(k)),
+            CloseFloatingPanesKeyed(c) => {
+                Mux::get().remove_floats(pane.pane_id(), |key| {
+                    c.key.as_deref() == Some(key)
+                        || c.prefix.as_deref().map_or(false, |p| key.starts_with(p))
+                });
+                if let Some(window) = self.window.as_ref() {
+                    window.invalidate();
+                }
+            }
             FloatingPaneLeader => {
                 if self.get_active_float().is_some() {
                     self.float_leader_pending = true;

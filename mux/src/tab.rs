@@ -681,6 +681,26 @@ impl Tab {
         taken
     }
 
+    /// Removes the floats anchored to `owner` whose key matches, returning
+    /// their tabs
+    pub fn take_float_tabs_keyed(
+        &self,
+        owner: PaneId,
+        matches: impl Fn(&str) -> bool,
+    ) -> Vec<Arc<Tab>> {
+        let mut floats = self.floats.lock();
+        let mut taken = vec![];
+        floats.retain_mut(|f| {
+            if f.owner == owner && matches(&f.key) {
+                taken.append(&mut f.tabs);
+                false
+            } else {
+                true
+            }
+        });
+        taken
+    }
+
     pub fn get_title(&self) -> String {
         self.inner.lock().title.clone()
     }

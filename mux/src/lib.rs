@@ -921,6 +921,23 @@ impl Mux {
         self.prune_dead_windows();
     }
 
+    /// Closes the floats over `owner` whose key matches, killing their panes
+    pub fn remove_floats(&self, owner: PaneId, matches: impl Fn(&str) -> bool) {
+        let tabs: Vec<Arc<Tab>> = self.tabs.read().values().cloned().collect();
+        for tab in tabs {
+            let taken = tab.take_float_tabs_keyed(owner, &matches);
+            if taken.is_empty() {
+                continue;
+            }
+            for float_tab in taken {
+                self.remove_tab_internal(float_tab.tab_id());
+            }
+            if let Some(window_id) = self.window_containing_tab(tab.tab_id()) {
+                self.notify(MuxNotification::WindowInvalidated(window_id));
+            }
+        }
+    }
+
     pub fn remove_tab(&self, tab_id: TabId) -> Option<Arc<Tab>> {
         let tab = self.remove_tab_internal(tab_id);
         self.prune_dead_windows();

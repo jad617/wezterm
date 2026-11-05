@@ -1614,6 +1614,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &[],
             icon: None,
         },
+        CloseFloatingPanesKeyed(_) => CommandDef {
+            brief: "Close Keyed Floating Panes".into(),
+            doc: "Closes floating split layouts of the current pane by key".into(),
+            keys: vec![],
+            args: &[ArgType::ActivePane],
+            menubar: &[],
+            icon: None,
+        },
         FloatingPaneLeader => CommandDef {
             brief: "Floating Pane Leader".into(),
             doc: "Makes the next leader key assignment act on the floating pane".into(),

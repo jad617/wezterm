@@ -452,6 +452,16 @@ pub struct FloatingPaneKey {
 }
 
 #[derive(Default, Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
+pub struct CloseFloatingPanesKeyed {
+    /// Closes the float with exactly this key
+    #[dynamic(default)]
+    pub key: Option<String>,
+    /// Closes the floats whose key starts with this
+    #[dynamic(default)]
+    pub prefix: Option<String>,
+}
+
+#[derive(Default, Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
 pub struct QuickSelectArguments {
     /// Overrides the main quick_select_alphabet config
     #[dynamic(default)]
@@ -616,6 +626,9 @@ pub enum KeyAssignment {
     /// pane, told apart by `key` (e.g. one per Neovim window). Hides the
     /// focused float instead, if there is one.
     ToggleFloatingPaneKeyed(FloatingPaneKey),
+    /// Closes the keyed floats over the pane performing the action (e.g.
+    /// when the Neovim window that owns one closes), visible or not
+    CloseFloatingPanesKeyed(CloseFloatingPanesKeyed),
     /// Activates the leader so that the next leader key assignment acts
     /// on the focused floating split layout rather than on the pane that
     /// it floats over
